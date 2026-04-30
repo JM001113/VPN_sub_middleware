@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import base64
-import os
-from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from fastapi import FastAPI, Request
+from fastapi import HTTPException, Response
 from fastapi.responses import PlainTextResponse
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+import criterions
+from criterions import BaseCriterion
 
 
 class Settings(BaseSettings):
@@ -19,10 +20,11 @@ class Settings(BaseSettings):
 
     # Port your modifier service listens on.
     sub_port: int = 8080
+    base_sub_service_url: str = "sub"
 
     # Upstream 3x-ui subscription endpoint pieces.
     base_sub_port: int = 2053
-    base_sub_url: str = "sub"
+    base_sub_url: str = "unconfigured"
     upstream_host: str = "127.0.0.1"
 
     # Rewrites applied to each supported link.
@@ -109,8 +111,9 @@ def decode_base64_subscription(payload: str) -> str:
     except Exception:
         # Some upstreams may already return plain text or non-strict base64.
         try:
-            return base64.b64decode(compact + "===").decode("utf-8", errors="replace")
+            return payload
         except Exception:
+            payload = base64.b64decode(compact + "===").decode("utf-8", errors="replace")
             return payload
 
 
@@ -118,7 +121,13 @@ def encode_base64_subscription(text: str) -> str:
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
-def rewrite_subscription_text(decoded_text: str) -> str:
+def strip_email(text: str) -> str:
+    return text[:text.rfind("-")]
+
+
+def rewrite_subscription_text(decoded_text: str,
+                              criterion: BaseCriterion|Callable[[str], bool] = lambda x: True
+                              ) -> str:
     lines = decoded_text.splitlines()
     rewritten_lines: list[str] = []
 
@@ -126,7 +135,11 @@ def rewrite_subscription_text(decoded_text: str) -> str:
         stripped = line.strip()
         if not stripped:
             continue
-        rewritten_lines.append(rewrite_subscription_link(stripped))
+        stripped = strip_email(stripped)
+        if criterion(stripped):
+            rewritten_lines.append(rewrite_subscription_link(stripped))
+        else:
+            rewritten_lines.append(stripped)
 
     return "\n".join(rewritten_lines)
 
@@ -136,10 +149,10 @@ async def fetch_upstream_subscription(sub_id: str, client: httpx.AsyncClient) ->
 
     timeout = httpx.Timeout(settings.upstream_timeout_seconds)
 
-    #response = await client.get(upstream_url)
-    #response.raise_for_status()
-    response = "dmxlc3M6Ly9kZDBiNzhiMy00MzgzLTQ5YmUtYTMxNi02YTcyYzAwODVlNzZAd2wxLmZpbi5ib3lraXNzZXIta2V5cy50b3A6MzY0OTA/ZW5jcnlwdGlvbj1ub25lJmhvc3Q9Jm1vZGU9c3RyZWFtLXVwJnBhdGg9JTJGdGhpc2lzYXRlc3R0aGlzaXNjb29saGFoYSZzZWN1cml0eT1ub25lJnR5cGU9eGh0dHAjd2xkYgo="
-    return response  #.text
+    response = await client.get(upstream_url)
+    response.raise_for_status()
+
+    return response.text
 
 
 # ----------------------------
@@ -159,8 +172,9 @@ def rewrite_subscription_link(link: str) -> str:
     rewritten = replace_host_and_port(link, settings.target_host, settings.target_port)
 
     # 2) Required / requested query parameter changes.
-    rewritten = add_query_param(rewritten, "alpn", "h2")
+    rewritten = add_query_param(rewritten, "alpn", "http/1.1,h2")
     rewritten = add_query_param(rewritten, "host", "")  # keep it present even when empty
+    rewritten = add_query_param(rewritten, "security", "tls")
 
     # Optional server-name-related query rewrite.
     if settings.target_sni:
@@ -178,6 +192,7 @@ def rewrite_subscription_link(link: str) -> str:
 
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    print("We're in the exception handlier")
     if exc.status_code == 405:
         print("nf")
         return PlainTextResponse("Not Found", status_code=404)
@@ -194,7 +209,8 @@ async def health() -> dict[str, str]:
 
 @app.get("/{full_path:path}")
 async def subscription_modifier(full_path: str, request: Request) -> Response:
-    expected_prefix = settings.base_sub_url.strip("/")
+    print("I got something for", full_path, "\n", str(request.__dict__))
+    expected_prefix = settings.base_sub_service_url.strip("/")
     if not expected_prefix:
         raise HTTPException(status_code=500, detail="BASE_SUB_URL is not configured")
 
