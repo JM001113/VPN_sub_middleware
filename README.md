@@ -36,4 +36,3 @@ uvicorn main:app --host 127.0.0.1 --port 8080
 - The reusable parameter helpers are `add_query_param`, `remove_query_param`, and `set_query_param`.
 - `set_query_param()` is implemented as remove-then-add.
 - The service is designed to sit behind NGINX and receive plain HTTP from localhost.
-# VPN_sub_middleware
