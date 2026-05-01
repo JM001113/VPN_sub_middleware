@@ -14,7 +14,7 @@ A small FastAPI/Uvicorn service that:
 - port to `TARGET_PORT`
 - adds `alpn=h2`
 - keeps `host=` present even when empty
-- changes the fragment / display name to `TARGET_LINK_NAME`
+- changes the fragment / display name to `TARGET_LINK_NAME` (you can set it to a callable instead of just a fixed string, for example cutting off the comment)
 - optionally sets `sni=` when `TARGET_SNI` is configured
 
 ## Run
